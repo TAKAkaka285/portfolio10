@@ -47,8 +47,9 @@ export default function HumanDepthScene() {
   const mountRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const mount = mountRef.current;
-    if (!mount) return;
+    const mountEl = mountRef.current;
+    if (!mountEl) return;
+    const mount: HTMLDivElement = mountEl;
 
     // ── Renderer ──────────────────────────────────────────────────────────
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
