@@ -67,8 +67,8 @@ export default function HumanDepthScene() {
     const S = BOX_SIZE;
     const geos = [
       new THREE.BoxGeometry(S, S, S),                          // level 0: sharp
-      new RoundedBoxGeometry(S, S, S, 2, S * 0.18),           // level 1: slightly rounded
-      new RoundedBoxGeometry(S, S, S, 2, S * 0.38),           // level 2: more rounded
+      new RoundedBoxGeometry(S, S, S, 1, S * 0.18),           // level 1: slightly rounded
+      new RoundedBoxGeometry(S, S, S, 1, S * 0.38),           // level 2: more rounded
       new THREE.SphereGeometry(S * 0.5, 8, 8),                // level 3: full sphere
     ];
 
