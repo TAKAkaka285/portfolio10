@@ -38,3 +38,7 @@ next-env.d.ts
 # media (not committed)
 /public/video/
 /video_work/
+.vercel
+.env*
+/public/images/
+/public/icons/
