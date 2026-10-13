@@ -15,10 +15,8 @@ const ALPHA_THRESHOLD = 50;
 const SIZE_MULTIPLIER = 0.92;
 
 // ── Video source ──────────────────────────────────────────────────────────────
-// 1 本の mp4 を 3 分割: [color | mask | depth] (各 480x270, 9fps)
-const VIDEO_SRC    = "/video/depth_scene.mp4";
-const PANEL_W      = 480;
-const PANEL_H      = 270;
+// 1 本の mp4 を左右に分割: [mask | depth] (各 COLS x ROWS = グリッドと同サイズ, 9fps)
+const VIDEO_SRC    = "/video/depth_scene_grid.mp4";
 const VIDEO_FPS    = 9;
 
 // Depth color gradient (green)
@@ -76,13 +74,12 @@ export default function HumanDepthScene() {
     const mat   = new THREE.MeshBasicMaterial();
     const insts = geos.map((geo) => new THREE.InstancedMesh(geo, mat, INSTANCE_COUNT));
 
-    const hiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
     for (const inst of insts) {
       inst.rotation.z = -Math.PI / 2;
       inst.position.y = 0.4;
       scene.add(inst);
-      for (let i = 0; i < INSTANCE_COUNT; i++) inst.setMatrixAt(i, hiddenMatrix);
-      inst.instanceMatrix.needsUpdate = true;
+      inst.count = 0;
+      inst.frustumCulled = false;
     }
 
     // ── Grid step ─────────────────────────────────────────────────────────
@@ -99,64 +96,61 @@ export default function HumanDepthScene() {
     }
 
     // ── Offscreen canvases ────────────────────────────────────────────────
-    const colorCanvas = document.createElement("canvas");
-    colorCanvas.width = COLS; colorCanvas.height = ROWS;
-    const colorCtx = colorCanvas.getContext("2d", { willReadFrequently: true } as CanvasRenderingContext2DSettings)!;
+    const frameCanvas = document.createElement("canvas");
+    frameCanvas.width = COLS * 2; frameCanvas.height = ROWS;
+    const frameCtx = frameCanvas.getContext("2d", { willReadFrequently: true } as CanvasRenderingContext2DSettings)!;
 
-    const depthCanvas = document.createElement("canvas");
-    depthCanvas.width = COLS; depthCanvas.height = ROWS;
-    const depthCtx = depthCanvas.getContext("2d", { willReadFrequently: true } as CanvasRenderingContext2DSettings)!;
-
-    const dummy = new THREE.Object3D();
-    const col   = new THREE.Color();
+    // レベルごとの表示インスタンス数 (表示するものだけ先頭から詰めて描画する)
+    const counts = [0, 0, 0, 0];
+    const col    = new THREE.Color();
 
     // ── Update instances ──────────────────────────────────────────────────
     function updateInstances(video: HTMLVideoElement) {
-      // mask panel -> colorCanvas (R channel = alpha), depth panel -> depthCanvas
-      colorCtx.drawImage(video, PANEL_W, 0, PANEL_W, PANEL_H, 0, 0, COLS, ROWS);
-      depthCtx.drawImage(video, PANEL_W * 2, 0, PANEL_W, PANEL_H, 0, 0, COLS, ROWS);
+      // 動画 1 フレームを 1 回だけ canvas に描き、左 = mask / 右 = depth を読み出す
+      frameCtx.drawImage(video, 0, 0);
 
-      const colorPx = colorCtx.getImageData(0, 0, COLS, ROWS).data;
-      const depthPx = depthCtx.getImageData(0, 0, COLS, ROWS).data;
+      const colorPx = frameCtx.getImageData(0, 0, COLS, ROWS).data;
+      const depthPx = frameCtx.getImageData(COLS, 0, COLS, ROWS).data;
 
+      counts.fill(0);
       for (let row = 0; row < ROWS; row++) {
         for (let c = 0; c < COLS; c++) {
-          const pixIdx  = (row * COLS + c) * 4;
-          const instIdx = row * COLS + c;
-          const alpha   = colorPx[pixIdx];
+          const pixIdx = (row * COLS + c) * 4;
+          if (colorPx[pixIdx] < ALPHA_THRESHOLD) continue;
 
-          if (alpha < ALPHA_THRESHOLD) {
-            dummy.scale.set(0, 0, 0); dummy.position.set(0, 0, 0); dummy.updateMatrix();
-            for (const inst of insts) inst.setMatrixAt(instIdx, dummy.matrix);
-          } else {
-            const depthVal = depthPx[pixIdx] / 255;
-            const x = (c    - COLS / 2 + 0.5) * stepX;
-            const y = (ROWS / 2 - row  - 0.5) * stepY;
-            const z = depthVal * DEPTH_SCALE;
-            const s = 1.0 - depthVal * 0.75;
-            const lvl = getLevelIndex(depthVal);
+          const depthVal = depthPx[pixIdx] / 255;
+          const x = (c    - COLS / 2 + 0.5) * stepX;
+          const y = (ROWS / 2 - row  - 0.5) * stepY;
+          const z = depthVal * DEPTH_SCALE;
+          const s = 1.0 - depthVal * 0.75;
+          const lvl = getLevelIndex(depthVal);
 
-            depthToColor(depthVal, col);
+          depthToColor(depthVal, col);
 
-            for (let li = 0; li < insts.length; li++) {
-              if (li === lvl) {
-                dummy.position.set(x, y, z);
-                dummy.scale.set(s, s, s);
-                dummy.updateMatrix();
-                insts[li].setMatrixAt(instIdx, dummy.matrix);
-                insts[li].setColorAt(instIdx, col);
-              } else {
-                dummy.scale.set(0, 0, 0); dummy.position.set(0, 0, 0); dummy.updateMatrix();
-                insts[li].setMatrixAt(instIdx, dummy.matrix);
-              }
-            }
-          }
+          const inst = insts[lvl];
+          const n = counts[lvl]++;
+          const m = inst.instanceMatrix.array as Float32Array;
+          const o = n * 16;
+          m[o]     = s; m[o + 1]  = 0; m[o + 2]  = 0; m[o + 3]  = 0;
+          m[o + 4] = 0; m[o + 5]  = s; m[o + 6]  = 0; m[o + 7]  = 0;
+          m[o + 8] = 0; m[o + 9]  = 0; m[o + 10] = s; m[o + 11] = 0;
+          m[o + 12] = x; m[o + 13] = y; m[o + 14] = z; m[o + 15] = 1;
+          inst.setColorAt(n, col);
         }
       }
 
-      for (const inst of insts) {
+      for (let li = 0; li < insts.length; li++) {
+        const inst = insts[li];
+        inst.count = counts[li];
+        if (counts[li] === 0) continue;
+        inst.instanceMatrix.clearUpdateRanges();
+        inst.instanceMatrix.addUpdateRange(0, counts[li] * 16);
         inst.instanceMatrix.needsUpdate = true;
-        if (inst.instanceColor) inst.instanceColor.needsUpdate = true;
+        if (inst.instanceColor) {
+          inst.instanceColor.clearUpdateRanges();
+          inst.instanceColor.addUpdateRange(0, counts[li] * 3);
+          inst.instanceColor.needsUpdate = true;
+        }
       }
     }
 
