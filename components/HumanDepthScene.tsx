@@ -5,8 +5,6 @@ import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const PRELOAD_FRAMES  = 30;
-const FPS_INTERVAL    = 112;
 
 const COLS            = 200;
 const ROWS            = 270;
@@ -17,9 +15,11 @@ const ALPHA_THRESHOLD = 50;
 const SIZE_MULTIPLIER = 0.92;
 
 // ── Video source ──────────────────────────────────────────────────────────────
-const TOTAL_FRAMES = 2131;
-const COLOR_PATH   = "/video/masked";
-const DEPTH_PATH   = "/video/depth";
+// 1 本の mp4 を 3 分割: [color | mask | depth] (各 480x270, 9fps)
+const VIDEO_SRC    = "/video/depth_scene.mp4";
+const PANEL_W      = 480;
+const PANEL_H      = 270;
+const VIDEO_FPS    = 9;
 
 // Depth color gradient (green)
 const C_SHALLOW = new THREE.Color(0xffffff);
@@ -32,10 +32,6 @@ function depthToColor(d: number, out: THREE.Color): void {
   } else {
     out.lerpColors(C_DEEP, C_MID, Math.pow(d * 2.0, 1.8));
   }
-}
-
-function padFrame(n: number): string {
-  return String(n).padStart(4, "0");
 }
 
 // ── Round levels: depth range → geometry ─────────────────────────────────────
@@ -93,7 +89,7 @@ export default function HumanDepthScene() {
     let stepX = S;
     let stepY = S;
     let aspectApplied = false;
-    function applyAspect(_img: HTMLImageElement | ImageBitmap) {
+    function applyAspect(_img: HTMLImageElement | ImageBitmap | null) {
       if (aspectApplied) return;
       aspectApplied = true;
       const vFov = (75 * Math.PI) / 180;
@@ -115,13 +111,10 @@ export default function HumanDepthScene() {
     const col   = new THREE.Color();
 
     // ── Update instances ──────────────────────────────────────────────────
-    function updateInstances(colorTex: THREE.Texture, depthTex: THREE.Texture) {
-      const colorImg = colorTex.image as CanvasImageSource;
-      const depthImg = depthTex.image as CanvasImageSource;
-      if (!colorImg || !depthImg) return;
-
-      colorCtx.drawImage(colorImg, 0, 0, COLS, ROWS);
-      depthCtx.drawImage(depthImg, 0, 0, COLS, ROWS);
+    function updateInstances(video: HTMLVideoElement) {
+      // mask panel -> colorCanvas (R channel = alpha), depth panel -> depthCanvas
+      colorCtx.drawImage(video, PANEL_W, 0, PANEL_W, PANEL_H, 0, 0, COLS, ROWS);
+      depthCtx.drawImage(video, PANEL_W * 2, 0, PANEL_W, PANEL_H, 0, 0, COLS, ROWS);
 
       const colorPx = colorCtx.getImageData(0, 0, COLS, ROWS).data;
       const depthPx = depthCtx.getImageData(0, 0, COLS, ROWS).data;
@@ -130,7 +123,7 @@ export default function HumanDepthScene() {
         for (let c = 0; c < COLS; c++) {
           const pixIdx  = (row * COLS + c) * 4;
           const instIdx = row * COLS + c;
-          const alpha   = colorPx[pixIdx + 3];
+          const alpha   = colorPx[pixIdx];
 
           if (alpha < ALPHA_THRESHOLD) {
             dummy.scale.set(0, 0, 0); dummy.position.set(0, 0, 0); dummy.updateMatrix();
@@ -167,46 +160,18 @@ export default function HumanDepthScene() {
       }
     }
 
-    // ── Texture cache ─────────────────────────────────────────────────────
-    const loader = new THREE.TextureLoader();
-
-    const colorCache = new Array<THREE.Texture | null>(TOTAL_FRAMES).fill(null);
-    const depthCache = new Array<THREE.Texture | null>(TOTAL_FRAMES).fill(null);
-
-    let lazyInterval: ReturnType<typeof setInterval> | null = null;
-
-    function loadFrame(index: number) {
-      const id = padFrame(index);
-      if (!colorCache[index]) {
-        loader.load(`${COLOR_PATH}/frame_${id}.webp`, (tex) => {
-          tex.minFilter = THREE.LinearFilter;
-          colorCache[index] = tex;
-          if (index === 0) applyAspect(tex.image as HTMLImageElement);
-        });
-      }
-      if (!depthCache[index]) {
-        loader.load(`${DEPTH_PATH}/frame_${id}.webp`, (tex) => {
-          tex.minFilter = THREE.LinearFilter;
-          depthCache[index] = tex;
-        });
-      }
-    }
-
-    function startLazyLoad(fromIndex: number) {
-      if (lazyInterval) clearInterval(lazyInterval);
-      let lazyIndex = fromIndex;
-      lazyInterval = window.setInterval(() => {
-        if (lazyIndex >= TOTAL_FRAMES) { clearInterval(lazyInterval!); lazyInterval = null; return; }
-        for (let b = 0; b < 5 && lazyIndex < TOTAL_FRAMES; b++, lazyIndex++) loadFrame(lazyIndex);
-      }, 100);
-    }
-
-    for (let i = 0; i < PRELOAD_FRAMES; i++) loadFrame(i);
-    startLazyLoad(PRELOAD_FRAMES);
+    // ── Video source ──────────────────────────────────────────────────────
+    const video = document.createElement("video");
+    video.src = VIDEO_SRC;
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.play().catch(() => {});
+    applyAspect(null);
 
     // ── Animation state ───────────────────────────────────────────────────
     let currentFrame     = 0;
-    let lastFrameTime    = performance.now();
     let lastUpdatedFrame = -1;
 
     const targetOffset  = new THREE.Vector2(0, 0);
@@ -243,14 +208,12 @@ export default function HumanDepthScene() {
     let animId: number;
     function animate(now: number) {
       animId = requestAnimationFrame(animate);
-      if (now - lastFrameTime >= FPS_INTERVAL) {
-        currentFrame = (currentFrame + 1) % TOTAL_FRAMES;
-        lastFrameTime = now;
+      if (video.readyState >= 2) {
+        currentFrame = Math.floor(video.currentTime * VIDEO_FPS);
       }
-      if (currentFrame !== lastUpdatedFrame) {
-        const ct = colorCache[currentFrame];
-        const dt = depthCache[currentFrame];
-        if (ct && dt) { updateInstances(ct, dt); lastUpdatedFrame = currentFrame; }
+      if (currentFrame !== lastUpdatedFrame && video.readyState >= 2) {
+        updateInstances(video);
+        lastUpdatedFrame = currentFrame;
       }
       currentOffset.lerp(targetOffset, 0.05);
       camera.position.x = currentOffset.x;
@@ -262,7 +225,9 @@ export default function HumanDepthScene() {
     // ── Cleanup ───────────────────────────────────────────────────────────
     return () => {
       cancelAnimationFrame(animId);
-      if (lazyInterval) clearInterval(lazyInterval);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
       if (idleTimer) clearTimeout(idleTimer);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("resize",    onResize);
@@ -270,8 +235,6 @@ export default function HumanDepthScene() {
       geos.forEach((g) => g.dispose());
       mat.dispose();
       insts.forEach((inst) => inst.dispose());
-      colorCache.forEach((t) => t?.dispose());
-      depthCache.forEach((t) => t?.dispose());
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
     };
   }, []);
